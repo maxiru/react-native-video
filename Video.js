@@ -13,7 +13,7 @@ const styles = StyleSheet.create({
   },
 });
 
-export { TextTrackType, FilterType };
+export { TextTrackType, FilterType, DRMType };
 
 export default class Video extends Component {
 
@@ -78,6 +78,10 @@ export default class Video extends Component {
   save = async (options?) => {
     return await NativeModules.VideoManager.save(options, findNodeHandle(this._root));
   }
+
+  restoreUserInterfaceForPictureInPictureStopCompleted = (restored) => {
+    this.setNativeProps({ restoreUserInterfaceForPIPStopCompletionHandler: restored });
+  };
 
   _assignRoot = (component) => {
     this._root = component;
@@ -199,6 +203,18 @@ export default class Video extends Component {
     }
   };
 
+  _onPictureInPictureStatusChanged = (event) => {
+    if (this.props.onPictureInPictureStatusChanged) {
+      this.props.onPictureInPictureStatusChanged(event.nativeEvent);
+    }
+  };
+
+  _onRestoreUserInterfaceForPictureInPictureStop = (event) => {
+  	if (this.props.onRestoreUserInterfaceForPictureInPictureStop) {
+      this.props.onRestoreUserInterfaceForPictureInPictureStop();
+    }
+  };
+
   _onAudioFocusChanged = (event) => {
     if (this.props.onAudioFocusChanged) {
       this.props.onAudioFocusChanged(event.nativeEvent);
@@ -211,27 +227,61 @@ export default class Video extends Component {
     }
   };
 
+  _onGetLicense = (event) => {
+    if (this.props.source && this.props.source.drm && this.props.source.drm.getLicense instanceof Function) {
+      const data = event.nativeEvent;
+      if (data && data.spc) {
+        const getLicenseOverride = this.props.source.drm.getLicense(data.spc, this.props);
+        const getLicensePromise = Promise.resolve(getLicenseOverride); // Handles both scenarios, getLicenseOverride being a promise and not.
+        getLicensePromise.then((result => {
+          if (result !== undefined) {
+            NativeModules.VideoManager.setLicenseResult(result, findNodeHandle(this._root));
+          } else {
+            NativeModules.VideoManager.setLicenseError && NativeModules.VideoManager.setLicenseError('Empty license result', findNodeHandle(this._root));
+          }
+        })).catch((error) => {
+          NativeModules.VideoManager.setLicenseError && NativeModules.VideoManager.setLicenseError(error, findNodeHandle(this._root));
+        });
+      } else {
+        NativeModules.VideoManager.setLicenseError && NativeModules.VideoManager.setLicenseError("No spc received", findNodeHandle(this._root));
+      }
+    }
+  }
+  getViewManagerConfig = viewManagerName => {
+    if (!NativeModules.UIManager.getViewManagerConfig) {
+      return NativeModules.UIManager[viewManagerName];
+    }
+    return NativeModules.UIManager.getViewManagerConfig(viewManagerName);
+  };
+
   render() {
     const resizeMode = this.props.resizeMode;
     const source = resolveAssetSource(this.props.source) || {};
+    const shouldCache = !Boolean(source.__packager_asset)
 
     let uri = source.uri || '';
     if (uri && uri.match(/^\//)) {
       uri = `file://${uri}`;
+    }
+    
+    if (!uri) {
+      console.warn('Trying to load empty source.');
     }
 
     const isNetwork = !!(uri && uri.match(/^https?:/));
     const isAsset = !!(uri && uri.match(/^(assets-library|ipod-library|file|content|ms-appx|ms-appdata):/));
 
     let nativeResizeMode;
+    const RCTVideoInstance = this.getViewManagerConfig('RCTVideo');
+
     if (resizeMode === VideoResizeMode.stretch) {
-      nativeResizeMode = NativeModules.UIManager.RCTVideo.Constants.ScaleToFill;
+      nativeResizeMode = RCTVideoInstance.Constants.ScaleToFill;
     } else if (resizeMode === VideoResizeMode.contain) {
-      nativeResizeMode = NativeModules.UIManager.RCTVideo.Constants.ScaleAspectFit;
+      nativeResizeMode = RCTVideoInstance.Constants.ScaleAspectFit;
     } else if (resizeMode === VideoResizeMode.cover) {
-      nativeResizeMode = NativeModules.UIManager.RCTVideo.Constants.ScaleAspectFill;
+      nativeResizeMode = RCTVideoInstance.Constants.ScaleAspectFill;
     } else {
-      nativeResizeMode = NativeModules.UIManager.RCTVideo.Constants.ScaleNone;
+      nativeResizeMode = RCTVideoInstance.Constants.ScaleNone;
     }
 
     const nativeProps = Object.assign({}, this.props);
@@ -242,6 +292,7 @@ export default class Video extends Component {
         uri,
         isNetwork,
         isAsset,
+        shouldCache,
         type: source.type || '',
         mainVer: source.mainVer || 0,
         patchVer: source.patchVer || 0,
@@ -269,6 +320,9 @@ export default class Video extends Component {
       onPlaybackRateChange: this._onPlaybackRateChange,
       onAudioFocusChanged: this._onAudioFocusChanged,
       onAudioBecomingNoisy: this._onAudioBecomingNoisy,
+      onGetLicense: nativeProps.source && nativeProps.source.drm && nativeProps.source.drm.getLicense && this._onGetLicense,
+      onPictureInPictureStatusChanged: this._onPictureInPictureStatusChanged,
+      onRestoreUserInterfaceForPictureInPictureStop: this._onRestoreUserInterfaceForPictureInPictureStop,
     });
 
     const posterStyle = {
@@ -342,12 +396,16 @@ Video.propTypes = {
           DRMType.CLEARKEY, DRMType.FAIRPLAY, DRMType.WIDEVINE, DRMType.PLAYREADY
         ]),
         licenseServer: PropTypes.string,
-        headers: PropTypes.shape({})
+        headers: PropTypes.shape({}),
+        base64Certificate: PropTypes.bool,
+        certificateUrl: PropTypes.string,
+        getLicense: PropTypes.func,
       })
     }),
     // Opaque type returned by require('./video.mp4')
     PropTypes.number
   ]),
+  minLoadRetryCount: PropTypes.number,
   maxBitRate: PropTypes.number,
   resizeMode: PropTypes.string,
   poster: PropTypes.string,
@@ -398,9 +456,7 @@ Video.propTypes = {
   }),
   stereoPan: PropTypes.number,
   rate: PropTypes.number,
-  drmUrl: PropTypes.string,
-  drmName: PropTypes.string,
-  drmHeader: PropTypes.object,
+  pictureInPicture: PropTypes.bool,
   playInBackground: PropTypes.bool,
   playWhenInactive: PropTypes.bool,
   ignoreSilentSwitch: PropTypes.oneOf(['ignore', 'obey']),
@@ -432,6 +488,8 @@ Video.propTypes = {
   onPlaybackRateChange: PropTypes.func,
   onAudioFocusChanged: PropTypes.func,
   onAudioBecomingNoisy: PropTypes.func,
+  onPictureInPictureStatusChanged: PropTypes.func,
+  needsToRestoreUserInterfaceForPictureInPictureStop: PropTypes.func,
   onExternalPlaybackChange: PropTypes.func,
 
   /* Required by react-native */

@@ -32,6 +32,7 @@ RCT_EXPORT_VIEW_PROPERTY(controls, BOOL);
 RCT_EXPORT_VIEW_PROPERTY(volume, float);
 RCT_EXPORT_VIEW_PROPERTY(playInBackground, BOOL);
 RCT_EXPORT_VIEW_PROPERTY(playWhenInactive, BOOL);
+RCT_EXPORT_VIEW_PROPERTY(pictureInPicture, BOOL);
 RCT_EXPORT_VIEW_PROPERTY(ignoreSilentSwitch, NSString);
 RCT_EXPORT_VIEW_PROPERTY(rate, float);
 RCT_EXPORT_VIEW_PROPERTY(seek, NSDictionary);
@@ -42,6 +43,7 @@ RCT_EXPORT_VIEW_PROPERTY(fullscreenOrientation, NSString);
 RCT_EXPORT_VIEW_PROPERTY(filter, NSString);
 RCT_EXPORT_VIEW_PROPERTY(filterEnabled, BOOL);
 RCT_EXPORT_VIEW_PROPERTY(progressUpdateInterval, float);
+RCT_EXPORT_VIEW_PROPERTY(restoreUserInterfaceForPIPStopCompletionHandler, BOOL);
 /* Should support: onLoadStart, onLoad, and onError to stay consistent with Image */
 RCT_EXPORT_VIEW_PROPERTY(onVideoLoadStart, RCTBubblingEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onVideoLoad, RCTBubblingEventBlock);
@@ -62,6 +64,7 @@ RCT_EXPORT_VIEW_PROPERTY(onPlaybackStalled, RCTBubblingEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onPlaybackResume, RCTBubblingEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onPlaybackRateChange, RCTBubblingEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onVideoExternalPlaybackChange, RCTBubblingEventBlock);
+RCT_EXPORT_VIEW_PROPERTY(onGetLicense, RCTBubblingEventBlock);
 RCT_REMAP_METHOD(save,
         options:(NSDictionary *)options
         reactTag:(nonnull NSNumber *)reactTag
@@ -76,7 +79,36 @@ RCT_REMAP_METHOD(save,
             [view save:options resolve:resolve reject:reject];
         }
     }];
-}
+};
+RCT_REMAP_METHOD(setLicenseResult,
+         license:(NSString *)license
+         reactTag:(nonnull NSNumber *)reactTag)
+{
+    [self.bridge.uiManager prependUIBlock:^(__unused RCTUIManager *uiManager, NSDictionary<NSNumber *, RCTVideo *> *viewRegistry) {
+        RCTVideo *view = viewRegistry[reactTag];
+        if (![view isKindOfClass:[RCTVideo class]]) {
+            RCTLogError(@"Invalid view returned from registry, expecting RCTVideo, got: %@", view);
+        } else {
+            [view setLicenseResult:license];
+        }
+    }];
+};
+
+RCT_REMAP_METHOD(setLicenseResultError,
+                 error:(NSString *)error
+                 reactTag:(nonnull NSNumber *)reactTag)
+{
+    [self.bridge.uiManager prependUIBlock:^(__unused RCTUIManager *uiManager, NSDictionary<NSNumber *, RCTVideo *> *viewRegistry) {
+        RCTVideo *view = viewRegistry[reactTag];
+        if (![view isKindOfClass:[RCTVideo class]]) {
+            RCTLogError(@"Invalid view returned from registry, expecting RCTVideo, got: %@", view);
+        } else {
+            [view setLicenseResultError:error];
+        }
+    }];
+};
+RCT_EXPORT_VIEW_PROPERTY(onPictureInPictureStatusChanged, RCTBubblingEventBlock);
+RCT_EXPORT_VIEW_PROPERTY(onRestoreUserInterfaceForPictureInPictureStop, RCTBubblingEventBlock);
 
 - (NSDictionary *)constantsToExport
 {

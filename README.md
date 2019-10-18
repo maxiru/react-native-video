@@ -10,7 +10,7 @@ Version 3.x requires react-native >= 0.40.0
 ### Version 4.0.0 breaking changes
 Version 4.0.0 changes some behaviors and may require updates to your Gradle files.  See [Updating](#updating) for details.
 
-Version 4.0.0 now requires Android SDK 26+ and Gradle 3 plugin in order to support ExoPlayer 2.9.0. Google is dropping support for apps using SDKs older than 26 as of October 2018 and Gradle 2 as of January 2019. React Native 0.57 defaults to Gradle 3 & SDK 27.
+Version 4.0.0 now requires Android target SDK 26+ and Gradle 3 plugin in order to support ExoPlayer 2.9.0. Google is dropping support for apps using target SDKs older than 26 as of October 2018 and Gradle 2 as of January 2019. React Native 0.57 defaults to Gradle 3 & SDK 27.
 
 If you need to support an older React Native version, you should use react-native-video 3.2.1.
 
@@ -269,8 +269,10 @@ var styles = StyleSheet.create({
 * [id](#id)
 * [ignoreSilentSwitch](#ignoresilentswitch)
 * [maxBitRate](#maxbitrate)
+* [minLoadRetryCount](#minLoadRetryCount)
 * [muted](#muted)
 * [paused](#paused)
+* [pictureInPicture](#pictureinpicture)
 * [playInBackground](#playinbackground)
 * [playWhenInactive](#playwheninactive)
 * [poster](#poster)
@@ -300,14 +302,17 @@ var styles = StyleSheet.create({
 * [onFullscreenPlayerDidDismiss](#onfullscreenplayerdiddismiss)
 * [onLoad](#onload)
 * [onLoadStart](#onloadstart)
+* [onPictureInPictureStatusChanged](#onpictureinpicturestatuschanged)
 * [onProgress](#onprogress)
 * [onSeek](#onseek)
+* [onRestoreUserInterfaceForPictureInPictureStop](#onrestoreuserinterfaceforpictureinpicturestop)
 * [onTimedMetadata](#ontimedmetadata)
 
 ### Methods
 * [dismissFullscreenPlayer](#dismissfullscreenplayer)
 * [presentFullscreenPlayer](#presentfullscreenplayer)
 * [save](#save)
+* [restoreUserInterfaceForPictureInPictureStop](#restoreuserinterfaceforpictureinpicturestop)
 * [seek](#seek)
 
 ### Configurable props
@@ -359,9 +364,9 @@ Determines whether to show player controls.
 
 Note on iOS, controls are always shown when in fullscreen mode.
 
-Controls are not available Android because the system does not provide a stock set of controls. You will need to build your own or use a package like [react-native-video-controls](https://github.com/itsnubix/react-native-video-controls) or [react-native-video-player](https://github.com/cornedor/react-native-video-player).
+For Android MediaPlayer, you will need to build your own controls or use a package like [react-native-video-controls](https://github.com/itsnubix/react-native-video-controls) or [react-native-video-player](https://github.com/cornedor/react-native-video-player).
 
-Platforms: iOS, react-native-dom
+Platforms: Android ExoPlayer, iOS, react-native-dom
 
 #### filter
 Add video filter
@@ -420,15 +425,18 @@ Platforms: iOS
 Platforms: iOS
 
 #### headers
-Pass headers to the HTTP client. Can be used for authorization.
+Pass headers to the HTTP client. Can be used for authorization. Headers must be a part of the source object.
 
 To enable this on iOS, you will need to manually edit RCTVideo.m and uncomment the header code in the playerItemForSource function. This is because the code used a private API and may cause your app to be rejected by the App Store. Use at your own risk.
 
 Example:
 ```
-headers={{
-  Authorization: 'bearer some-token-value',
-  'X-Custom-Header': 'some value'
+source={{
+  uri: "https://www.example.com/video.mp4",
+  headers: {
+    Authorization: 'bearer some-token-value',
+    'X-Custom-Header': 'some value'
+  }
 }}
 ```
 
@@ -472,6 +480,18 @@ maxBitRate={2000000} // 2 megabits
 
 Platforms: Android ExoPlayer, iOS
 
+#### minLoadRetryCount
+Sets the minimum number of times to retry loading data before failing and reporting an error to the application. Useful to recover from transient internet failures.
+
+Default: 3. Retry 3 times.
+
+Example:
+```
+minLoadRetryCount={5} // retry 5 times
+```
+
+Platforms: Android ExoPlayer
+
 #### muted
 Controls whether the audio is muted
 * **false (default)** - Don't mute audio
@@ -485,6 +505,13 @@ Controls whether the media is paused
 * **true** - Pause the media
 
 Platforms: all
+
+#### pictureInPicture
+Determine whether the media should played as picture in picture.
+* **false (default)** - Don't not play as picture in picture
+* **true** - Play the media as picture in picture
+
+Platforms: iOS
 
 #### playInBackground
 Determine whether the media should continue playing while the app is in the background. This allows customers to continue listening to the audio.
@@ -715,18 +742,63 @@ source={{ uri: 'http://host-serving-a-type-different-than-the-extension.ism/mani
 type: 'mpd' }}
 ```
 
-##### Provide DRM data
+##### Provide DRM data (only tested with http/https assets)
 
 You can provide some configuration to allow DRM playback.
 This feature will disable the use of `TextureView` on Android.
-DRM options are `type`, `licenseServer`, `headers`.
+DRM options are `type`, `licenseServer`, `headers`, and for iOS there are additional ones: `base64Certificate`, `getLicense`, `certificateUrl`.
+
+###### base64Certificate
+
+Whether or not the certificate url returns it on base64.
+
+Platforms: iOS
+
+###### certificateUrl
+
+URL to fetch a valid certificatefor FairPlay.
+
+Platforms: iOS
+
+###### getLicense
+
+Overridable method to acquire a license manually. It recieves as argument the `spc` string.
 
 Example:
+
+```js
+getLicense: (spcString) => {
+  const base64spc = Base64.encode(spcString);
+  const formData = new FormData();
+  formData.append('spc', base64spc);
+  return fetch(`https://license.pallycon.com/ri/licenseManager.do`, {
+      method: 'POST',
+      headers: {
+          'pallycon-customdata-v2': 'eyJkcm1fdHlwZSI6IkZhaXJQbGF5Iiwic2l0ZV9pZCI6IkJMMkciLCJ1c2VyX2lkIjoiMTIxMjc5IiwiY2lkIjoiYXNzZXRfMTQ5OTAiLCJ0b2tlbiI6IjBkQVVLSEQ4bm5pTStJeDJ2Y09HVStzSWRWY2wvSEdxSjdEanNZK1laazZKdlhLczRPM3BVNitVVnV3dkNvLzRyc2lIUi9PSnY4RDJncHBBN0cycnRGdy9pVFMvTWNZaVhML2VLOXdMMXFVM05VbXlFL25RdVV3Tm5mOXI2YlArUjUvRDZxOU5vZmZtTGUybmo4VGphQ3UwUUFQZlVqVzRFREE4eDNUYlI5cXZOa0pKVHdmNTA5NE5UYXY5VzJxbFp0MmczcDNMcUV0RkNMK0N5dFBZSWJEN2ZBUmR1ZzkvVTdiMXB1Y3pndTBqRjg3QnlMU0tac0J3TUpYd2xSZkxTTTZJSzRlWHMvNC9RWU4rVXhnR3ozVTgxODl4aHhWS0RJaDdBcGFkQVllVUZUMWJIVVZBSVVRQms0cjRIQ28yczIydWJvVnVLaVNQazdvYmtJckVNQT09IiwidGltZXN0YW1wIjoiMjAxOS0wMi0xMlQwNjoxODo0MloiLCJoYXNoIjoiMThqcDBDVTdOaUJ3WFdYVC8zR2lFN3R0YXVRWlZ5SjVSMUhSK2J2Um9JWT0ifQ==',
+          'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData
+  }).then(response => response.text()).then((response) => {
+      return response;
+  }).catch((error) => {
+      console.error('Error', error);
+  });
+}
 ```
+
+Platforms: iOS
+
+###### headers
+
+You can customize headers send to the licenseServer.
+
+Example:
+
+```js
 source={{
     uri: 'https://media.axprod.net/TestVectors/v7-MultiDRM-SingleKey/Manifest_1080p.mpd',
     drm: {
-        type: 'widevine',
+        type: 'widevine', //or DRMType.WIDEVINE
         licenseServer: 'https://drm-widevine-licensing.axtest.net/AcquireLicense',
         headers: {
             'X-AxDRM-Message': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ2ZXJzaW9uIjoxLCJjb21fa2V5X2lkIjoiYjMzNjRlYjUtNTFmNi00YWUzLThjOTgtMzNjZWQ1ZTMxYzc4IiwibWVzc2FnZSI6eyJ0eXBlIjoiZW50aXRsZW1lbnRfbWVzc2FnZSIsImZpcnN0X3BsYXlfZXhwaXJhdGlvbiI6NjAsInBsYXlyZWFkeSI6eyJyZWFsX3RpbWVfZXhwaXJhdGlvbiI6dHJ1ZX0sImtleXMiOlt7ImlkIjoiOWViNDA1MGQtZTQ0Yi00ODAyLTkzMmUtMjdkNzUwODNlMjY2IiwiZW5jcnlwdGVkX2tleSI6ImxLM09qSExZVzI0Y3Iya3RSNzRmbnc9PSJ9XX19.FAbIiPxX8BHi9RwfzD7Yn-wugU19ghrkBFKsaCPrZmU'
@@ -735,7 +807,58 @@ source={{
 }}
 ```
 
-Platforms: Android
+###### licenseServer
+
+The URL pointing to the licenseServer that will provide the authorization to play the protected stream.
+
+iOS specific fields for `drm`:
+
+* `certificateUrl` - Url to the .cer file.
+* `contentId` (optional) - (overridable, otherwise it will take the value at `loadingRequest.request.URL.host`)
+* `getLicense` - `licenseServer` and `headers` will be ignored. You will obtain as argument the `SPC` (as ASCII string, you will probably need to convert it to base 64) obtained from your `contentId` + the provided certificate via `[loadingRequest streamingContentKeyRequestDataForApp:certificateData contentIdentifier:contentIdData options:nil error:&spcError];`.
+  You should return on this method a `CKC` in Base64, either by just returning it or returning a `Promise` that resolves with the `CKC`.
+  With this prop you can override the license acquisition flow, as an example:
+
+```js
+  getLicense: (spcString) => {
+    const base64spc = btoa(spcString);
+    return fetch(YOUR_LICENSE_SERVER, {
+        method: 'POST',
+        // Control the headers
+        headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+        },
+        // Build the data as the server specs it
+        body: JSON.stringify({
+            getFairplayLicense: {
+                releasePid: myPid,
+                spcMessage: base64spc,
+            }
+        })
+    })
+        .then(response => response.json())
+        .then((response) => {
+            // Handle the response as you desire, f.e. when the server does not respond directly with the CKC
+            if (response && response.getFairplayLicenseResponse
+                && response.getFairplayLicenseResponse.ckcResponse) {
+                return response.getFairplayLicenseResponse.ckcResponse;
+            }
+            throw new Error('No correct response');
+        })
+        .catch((error) => {
+            console.error('CKC error', error);
+        });
+}
+```
+
+Platforms: Android, iOS
+
+###### type
+
+You can specify the DRM type, either by string or using the exported DRMType enum.
+Valid values are, for Android: DRMType.WIDEVINE / DRMType.PLAYREADY / DRMType.CLEARKEY.
+for iOS: DRMType.FAIRPLAY
 
 ###### Other protocols
 
@@ -958,6 +1081,22 @@ Example:
 
 Platforms: all
 
+#### onPictureInPictureStatusChanged
+Callback function that is called when picture in picture becomes active or inactive.
+
+Property | Type | Description
+--- | --- | ---
+isActive | boolean | Boolean indicating whether picture in picture is active
+
+Example:
+```
+{
+isActive: true
+}
+```
+
+Platforms:  iOS
+
 #### onProgress
 Callback function that is called every progressUpdateInterval seconds with info about which position the media is currently playing.
 
@@ -1000,6 +1139,13 @@ Both the currentTime & seekTime are reported because the video player may not se
 
 
 Platforms: Android ExoPlayer, Android MediaPlayer, iOS, Windows UWP
+
+#### onRestoreUserInterfaceForPictureInPictureStop
+Callback function that corresponds to Apple's [`restoreUserInterfaceForPictureInPictureStopWithCompletionHandler`](https://developer.apple.com/documentation/avkit/avpictureinpicturecontrollerdelegate/1614703-pictureinpicturecontroller?language=objc). Call `restoreUserInterfaceForPictureInPictureStopCompleted` inside of this function when done restoring the user interface. 
+
+Payload: none
+
+Platforms: iOS
 
 #### onTimedMetadata
 Callback function that is called when timed metadata becomes available
@@ -1089,6 +1235,18 @@ Future:
  
 Platforms: iOS
 
+#### restoreUserInterfaceForPictureInPictureStopCompleted
+`restoreUserInterfaceForPictureInPictureStopCompleted(restored)`
+
+This function corresponds to the completion handler in Apple's [restoreUserInterfaceForPictureInPictureStop](https://developer.apple.com/documentation/avkit/avpictureinpicturecontrollerdelegate/1614703-pictureinpicturecontroller?language=objc). IMPORTANT: This function must be called after `onRestoreUserInterfaceForPictureInPictureStop` is called. 
+
+Example:
+```
+this.player.restoreUserInterfaceForPictureInPictureStopCompleted(true);
+```
+
+Platforms: iOS
+
 #### seek()
 `seek(seconds)`
 
@@ -1166,12 +1324,13 @@ zip -r -n .mp4 *.mp4 player.video.example.com
 <Video source={{uri: "background", mainVer: 1, patchVer: 0}} // Looks for .mp4 file (background.mp4) in the given expansion version.
        resizeMode="cover"           // Fill the whole screen at aspect ratio.
        style={styles.backgroundVideo} />
+```
 
 ### Load files with the RN Asset System
 
 The asset system [introduced in RN `0.14`](http://www.reactnative.com/react-native-v0-14-0-released/) allows loading image resources shared across iOS and Android without touching native code. As of RN `0.31` [the same is true](https://github.com/facebook/react-native/commit/91ff6868a554c4930fd5fda6ba8044dbd56c8374) of mp4 video assets for Android. As of [RN `0.33`](https://github.com/facebook/react-native/releases/tag/v0.33.0) iOS is also supported. Requires `react-native-video@0.9.0`.
 
-```
+```javascript
 <Video
   source={require('../assets/video/turntable.mp4')}
 />
@@ -1202,8 +1361,8 @@ To enable audio to play in background on iOS the audio session needs to be set t
 
 ### Version 4.0.0
 
-#### Gradle 3 and SDK 26 requirement
-In order to support ExoPlayer 2.9.0, you must use version 3 or higher of the Gradle plugin. This is included by default in React Native 0.57. ExoPlayer 
+#### Gradle 3 and target SDK 26 requirement
+In order to support ExoPlayer 2.9.0, you must use version 3 or higher of the Gradle plugin. This is included by default in React Native 0.57.
 
 #### ExoPlayer 2.9.0 Java 1.8 requirement
 ExoPlayer 2.9.0 uses some Java 1.8 features, so you may need to enable support for Java 1.8 in your app/build.gradle file. If you get an error, compiling with ExoPlayer like:
@@ -1238,7 +1397,7 @@ Previously, on Android MediaPlayer if you setup an AppState event when the app w
 
 Note, Windows does not have a concept of an app going into the background, so this doesn't apply there.
 
-#### Use Android SDK 27 by default
+#### Use Android target SDK 27 by default
 Version 3.0 updates the Android build tools and SDK to version 27. React Native is in the process of [switchting over](https://github.com/facebook/react-native/issues/18095#issuecomment-395596130) to SDK 27 in preparation for Google's requirement that new Android apps [use SDK 26](https://android-developers.googleblog.com/2017/12/improving-app-security-and-performance.html) by August 2018.
 
 You will either need to install the version 27 SDK and version 27.0.3 buildtools or modify your build.gradle file to configure react-native-video to use the same build settings as the rest of your app as described below.

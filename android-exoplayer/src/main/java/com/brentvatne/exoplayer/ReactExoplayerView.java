@@ -13,7 +13,6 @@ import android.view.View;
 import android.view.Window;
 import android.view.accessibility.CaptioningManager;
 import android.widget.FrameLayout;
-import android.widget.Toast;
 
 import com.brentvatne.react.R;
 import com.brentvatne.receiver.AudioBecomingNoisyReceiver;
@@ -75,6 +74,7 @@ import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory;
 import com.google.android.exoplayer2.upstream.HttpDataSource;
 import com.google.android.exoplayer2.util.Util;
+import com.google.android.exoplayer2.ui.PlayerControlView;
 
 import java.net.CookieHandler;
 import java.net.CookieManager;
@@ -109,6 +109,9 @@ class ReactExoplayerView extends FrameLayout implements
     }
 
     private final VideoEventEmitter eventEmitter;
+    private PlayerControlView playerControlView;
+    private View playPauseControlContainer;
+    private Player.EventListener eventListener;
     
     private Handler mainHandler;
     private ExoPlayerView exoPlayerView;
@@ -127,6 +130,7 @@ class ReactExoplayerView extends FrameLayout implements
     private boolean isBuffering;
     private float rate = 1f;
     private float audioVolume = 1f;
+    private int minLoadRetryCount = 3;
     private int maxBitRate = 0;
     private long seekTime = C.TIME_UNSET;
 
@@ -155,6 +159,7 @@ class ReactExoplayerView extends FrameLayout implements
     private UUID drmUUID = null;
     private String drmLicenseUrl = null;
     private String[] drmLicenseHeader = null;
+    private boolean controls;
     // \ End props
 
     // React
@@ -193,8 +198,6 @@ class ReactExoplayerView extends FrameLayout implements
         audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         themedReactContext.addLifecycleEventListener(this);
         audioBecomingNoisyReceiver = new AudioBecomingNoisyReceiver(themedReactContext);
-
-        // initializePlayer();
     }
 
 
@@ -224,7 +227,6 @@ class ReactExoplayerView extends FrameLayout implements
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        Log.d("onAttachedToWindow", "drm url");
         initializePlayer();
     }
 
@@ -274,8 +276,77 @@ class ReactExoplayerView extends FrameLayout implements
     }
 
     // Internal methods
+
+    /**
+     * Toggling the visibility of the player control view 
+     */
+    private void togglePlayerControlVisibility() {
+        reLayout(playerControlView);
+        if (playerControlView.isVisible()) {
+            playerControlView.hide();
+        } else {
+            playerControlView.show();
+        }
+    }
+
+    /**
+     * Initializing Player control
+     */
+    private void initializePlayerControl() {
+        if (playerControlView == null) {
+            playerControlView = new PlayerControlView(getContext());
+        }
+
+        // Setting the player for the playerControlView
+        playerControlView.setPlayer(player);
+        playerControlView.show();
+        playPauseControlContainer = playerControlView.findViewById(R.id.exo_play_pause_container);
+
+        // Invoking onClick event for exoplayerView
+        exoPlayerView.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                togglePlayerControlVisibility();
+            }
+        });
+
+        // Invoking onPlayerStateChanged event for Player
+        eventListener = new Player.EventListener() {
+            @Override
+            public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+                reLayout(playPauseControlContainer);
+                //Remove this eventListener once its executed. since UI will work fine once after the reLayout is done
+                player.removeListener(eventListener);
+            }
+        };
+        player.addListener(eventListener);
+    }
+
+    /**
+     * Adding Player control to the frame layout
+     */
+    private void addPlayerControl() {
+        LayoutParams layoutParams = new LayoutParams(
+                LayoutParams.MATCH_PARENT,
+                LayoutParams.MATCH_PARENT);
+        playerControlView.setLayoutParams(layoutParams);
+        addView(playerControlView, 1, layoutParams);
+    }
+
+    /**
+     * Update the layout
+     * @param view  view needs to update layout
+     *
+     * This is a workaround for the open bug in react-native: https://github.com/facebook/react-native/issues/17968
+     */
+    private void reLayout(View view) {
+        if (view == null) return;
+        view.measure(MeasureSpec.makeMeasureSpec(getMeasuredWidth(), MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(getMeasuredHeight(), MeasureSpec.EXACTLY));
+        view.layout(view.getLeft(), view.getTop(), view.getMeasuredWidth(), view.getMeasuredHeight());
+    }
+
     private void initializePlayer() {
-        Log.d("initializePlayer", "drm url");
         if (player == null) {
             TrackSelection.Factory videoTrackSelectionFactory = new AdaptiveTrackSelection.Factory(BANDWIDTH_METER);
             trackSelector = new DefaultTrackSelector(videoTrackSelectionFactory);
@@ -295,6 +366,7 @@ class ReactExoplayerView extends FrameLayout implements
                             : (e.reason == UnsupportedDrmException.REASON_UNSUPPORTED_SCHEME
                             ? R.string.error_drm_unsupported_scheme : R.string.error_drm_unknown);
                     Log.d("Drm Info", getResources().getString(errorStringId));
+                    eventEmitter.error(getResources().getString(errorStringId), e);
                     return;
                 }
             }
@@ -338,6 +410,10 @@ class ReactExoplayerView extends FrameLayout implements
             eventEmitter.loadStart();
             loadVideoStarted = true;
         }
+
+        // Initializing the playerControlView
+        initializePlayerControl();
+        handleControls();
     }
 
 
@@ -375,12 +451,17 @@ class ReactExoplayerView extends FrameLayout implements
         switch (type) {
             case C.TYPE_SS:
                 return new SsMediaSource(uri, buildDataSourceFactory(false),
-                        new DefaultSsChunkSource.Factory(mediaDataSourceFactory), mainHandler, null);
+                        new DefaultSsChunkSource.Factory(mediaDataSourceFactory), 
+                        minLoadRetryCount, SsMediaSource.DEFAULT_LIVE_PRESENTATION_DELAY_MS, 
+                        mainHandler, null);
             case C.TYPE_DASH:
                 return new DashMediaSource(uri, buildDataSourceFactory(false),
-                        new DefaultDashChunkSource.Factory(mediaDataSourceFactory), mainHandler, null);
+                        new DefaultDashChunkSource.Factory(mediaDataSourceFactory), 
+                        minLoadRetryCount, DashMediaSource.DEFAULT_LIVE_PRESENTATION_DELAY_MS,
+                        mainHandler, null);
             case C.TYPE_HLS:
-                return new HlsMediaSource(uri, mediaDataSourceFactory, mainHandler, null);
+                return new HlsMediaSource(uri, mediaDataSourceFactory, 
+                        minLoadRetryCount, mainHandler, null);
             case C.TYPE_OTHER:
                 return new ExtractorMediaSource(uri, mediaDataSourceFactory, new DefaultExtractorsFactory(),
                         mainHandler, null);
@@ -582,6 +663,10 @@ class ReactExoplayerView extends FrameLayout implements
                 onBuffering(false);
                 startProgressHandler();
                 videoLoaded();
+                //Setting the visibility for the playerControlView
+                if(playerControlView != null) {
+                    playerControlView.show();
+                }
                 break;
             case ExoPlayer.STATE_ENDED:
                 text += "ended";
@@ -937,7 +1022,7 @@ class ReactExoplayerView extends FrameLayout implements
                 TrackGroup group = groups.get(i);
                 for (int j = 0; j < group.length; j++) {
                     Format format = group.getFormat(j);
-                    if (format.height == value.asInt()) {
+                    if (format.height == height) {
                         groupIndex = i;
                         tracks[0] = j;
                         break;
@@ -1065,6 +1150,11 @@ class ReactExoplayerView extends FrameLayout implements
         }
     }
 
+    public void setMinLoadRetryCountModifier(int newMinLoadRetryCount) {
+        minLoadRetryCount = newMinLoadRetryCount;
+        releasePlayer();
+        initializePlayer();
+    }
 
     public void setPlayInBackground(boolean playInBackground) {
         this.playInBackground = playInBackground;
@@ -1157,6 +1247,28 @@ class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onDrmKeysRemoved() {
-        Log.d("DRM Info", "onDrmKeysRestored");
+        Log.d("DRM Info", "onDrmKeysRemoved");
+    }
+
+    /**
+     * Handling controls prop
+     * 
+     * @param controls  Controls prop, if true enable controls, if false disable them
+     */
+    public void setControls(boolean controls) {
+        this.controls = controls;
+        if (playerControlView != null) {
+            this.handleControls();
+        }
+    }
+
+    private void handleControls() {
+        if (exoPlayerView != null) {
+            if (this.controls && !(getChildAt(1) instanceof PlayerControlView)) {
+                addPlayerControl();
+            } else if (!this.controls && getChildAt(1) instanceof PlayerControlView) {
+                removeViewAt(1);
+            }
+        }
     }
 }
