@@ -33,10 +33,6 @@ static int const RCTVideoUnset = -1;
   BOOL _playerLayerObserverSet;
   RCTVideoPlayerViewController *_playerViewController;
   NSURL *_videoURL;
-
-  /* DRM */
-  NSDictionary *_drm;
-  AVAssetResourceLoadingRequest *_loadingRequest;
   
   /* Required to publish events */
   RCTEventDispatcher *_eventDispatcher;
@@ -58,6 +54,7 @@ static int const RCTVideoUnset = -1;
   float _rate;
   float _maxBitRate;
 
+  BOOL _automaticallyWaitsToMinimizeStalling;
   BOOL _muted;
   BOOL _paused;
   BOOL _repeat;
@@ -91,7 +88,7 @@ static int const RCTVideoUnset = -1;
 {
   if ((self = [super init])) {
     _eventDispatcher = eventDispatcher;
-    
+	  _automaticallyWaitsToMinimizeStalling = YES;
     _playbackRateObserverRegistered = NO;
     _isExternalPlaybackActiveObserverRegistered = NO;
     _playbackStalled = NO;
@@ -227,6 +224,7 @@ static int const RCTVideoUnset = -1;
   if (_playInBackground) {
     // Needed to play sound in background. See https://developer.apple.com/library/ios/qa/qa1668/_index.html
     [_playerLayer setPlayer:nil];
+    [_playerViewController setPlayer:nil];
   }
 }
 
@@ -235,6 +233,7 @@ static int const RCTVideoUnset = -1;
   [self applyModifiers];
   if (_playInBackground) {
     [_playerLayer setPlayer:_player];
+    [_playerViewController setPlayer:_player];
   }
 }
 
@@ -358,8 +357,6 @@ static int const RCTVideoUnset = -1;
       [self setMaxBitRate:_maxBitRate];
       
       [_player pause];
-      [_playerViewController.view removeFromSuperview];
-      _playerViewController = nil;
         
       if (_playbackRateObserverRegistered) {
         [_player removeObserver:self forKeyPath:playbackRate context:nil];
@@ -380,8 +377,9 @@ static int const RCTVideoUnset = -1;
       _isExternalPlaybackActiveObserverRegistered = YES;
         
       [self addPlayerTimeObserver];
-        
-      _drm = [source objectForKey:@"drm"];
+      if (@available(iOS 10.0, *)) {
+        [self setAutomaticallyWaitsToMinimizeStalling:_automaticallyWaitsToMinimizeStalling];
+      }
 
       //Perform on next run loop, otherwise onVideoLoadStart is nil
       if (self.onVideoLoadStart) {
@@ -390,7 +388,6 @@ static int const RCTVideoUnset = -1;
         self.onVideoLoadStart(@{@"src": @{
                                         @"uri": uri ? uri : [NSNull null],
                                         @"type": type ? type : [NSNull null],
-                                        @"drm": _drm ? _drm : [NSNull null],
                                         @"isNetwork": [NSNumber numberWithBool:(bool)[source objectForKey:@"isNetwork"]]},
                                     @"target": self.reactTag
                                 });
@@ -482,8 +479,6 @@ static int const RCTVideoUnset = -1;
   bool shouldCache = [RCTConvert BOOL:[source objectForKey:@"shouldCache"]];
   NSString *uri = [source objectForKey:@"uri"];
   NSString *type = [source objectForKey:@"type"];
-  NSDictionary *drm = [source objectForKey:@"drm"];
-  AVURLAsset *asset;
   if (!uri || [uri isEqualToString:@""]) {
     DebugLog(@"Could not find video URL in source '%@'", source);
     return;
@@ -517,15 +512,16 @@ static int const RCTVideoUnset = -1;
     }
 #endif
 
-    asset = [AVURLAsset URLAssetWithURL:url options:assetOptions];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:assetOptions];
+    [self playerItemPrepareText:asset assetOptions:assetOptions withCallback:handler];
+    return;
   } else if (isAsset) {
-    asset = [AVURLAsset URLAssetWithURL:url options:nil];
-  } else {
-    asset = [AVURLAsset URLAssetWithURL:[[NSURL alloc] initFileURLWithPath:[[NSBundle mainBundle] pathForResource:uri ofType:type]] options:nil];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    [self playerItemPrepareText:asset assetOptions:assetOptions withCallback:handler];
+    return;
   }
-  dispatch_queue_t queue = dispatch_queue_create("assetQueue", nil);
-  [asset.resourceLoader setDelegate:self queue:queue];
 
+  AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[[NSURL alloc] initFileURLWithPath:[[NSBundle mainBundle] pathForResource:uri ofType:type]] options:nil];
   [self playerItemPrepareText:asset assetOptions:assetOptions withCallback:handler];
 }
 
@@ -586,27 +582,11 @@ static int const RCTVideoUnset = -1;
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
-  // when controls==true, this is a hack to reset the rootview when rotation happens in fullscreen
-  if (object == _playerViewController.contentOverlayView) {
-    if ([keyPath isEqualToString:@"frame"]) {
-      
-      CGRect oldRect = [change[NSKeyValueChangeOldKey] CGRectValue];
-      CGRect newRect = [change[NSKeyValueChangeNewKey] CGRectValue];
-      
-      if (!CGRectEqualToRect(oldRect, newRect)) {
-        if (CGRectEqualToRect(newRect, [UIScreen mainScreen].bounds)) {
-          NSLog(@"in fullscreen");
-        } else NSLog(@"not fullscreen");
-        
-        [self.reactViewController.view setFrame:[UIScreen mainScreen].bounds];
-        [self.reactViewController.view setNeedsLayout];
-      }
-      
-      return;
-    } else
-      return [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+
+  if([keyPath isEqualToString:readyForDisplayKeyPath] && [change objectForKey:NSKeyValueChangeNewKey] && self.onReadyForDisplay) {
+    self.onReadyForDisplay(@{@"target": self.reactTag});
+    return;
   }
-  
   if (object == _playerItem) {
     // When timeMetadata is read the event onTimedMetadata is triggered
     if ([keyPath isEqualToString:timedMetadata]) {
@@ -684,10 +664,7 @@ static int const RCTVideoUnset = -1;
         [self applyModifiers];
       } else if (_playerItem.status == AVPlayerItemStatusFailed && self.onVideoError) {
         self.onVideoError(@{@"error": @{@"code": [NSNumber numberWithInteger: _playerItem.error.code],
-                                        @"localizedDescription": [_playerItem.error localizedDescription] == nil ? @"" : [_playerItem.error localizedDescription],
-                                        @"localizedFailureReason": [_playerItem.error localizedFailureReason] == nil ? @"" : [_playerItem.error localizedFailureReason],
-                                        @"localizedRecoverySuggestion": [_playerItem.error localizedRecoverySuggestion] == nil ? @"" : [_playerItem.error localizedRecoverySuggestion],
-                                        @"domain": _playerItem != nil && _playerItem.error != nil ? _playerItem.error.domain : @"RTCVideo"},
+                                        @"domain": _playerItem.error.domain},
                             @"target": self.reactTag});
       }
     } else if ([keyPath isEqualToString:playbackBufferEmptyKeyPath]) {
@@ -700,12 +677,6 @@ static int const RCTVideoUnset = -1;
       }
       _playerBufferEmpty = NO;
       self.onVideoBuffer(@{@"isBuffering": @(NO), @"target": self.reactTag});
-    }
-  } else if (object == _playerLayer) {
-    if([keyPath isEqualToString:readyForDisplayKeyPath] && [change objectForKey:NSKeyValueChangeNewKey]) {
-      if([change objectForKey:NSKeyValueChangeNewKey] && self.onReadyForDisplay) {
-        self.onReadyForDisplay(@{@"target": self.reactTag});
-      }
     }
   } else if (object == _player) {
     if([keyPath isEqualToString:playbackRate]) {
@@ -727,8 +698,24 @@ static int const RCTVideoUnset = -1;
                                           @"target": self.reactTag});
         }
     }
-  } else {
-    [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+  } else if (object == _playerViewController.contentOverlayView) {
+      // when controls==true, this is a hack to reset the rootview when rotation happens in fullscreen
+      if ([keyPath isEqualToString:@"frame"]) {
+
+        CGRect oldRect = [change[NSKeyValueChangeOldKey] CGRectValue];
+        CGRect newRect = [change[NSKeyValueChangeNewKey] CGRectValue];
+
+        if (!CGRectEqualToRect(oldRect, newRect)) {
+          if (CGRectEqualToRect(newRect, [UIScreen mainScreen].bounds)) {
+            NSLog(@"in fullscreen");
+
+            [self.reactViewController.view setFrame:[UIScreen mainScreen].bounds];
+            [self.reactViewController.view setNeedsLayout];
+          } else NSLog(@"not fullscreen");
+        }
+
+        return;
+      }
   }
 }
 
@@ -758,13 +745,6 @@ static int const RCTVideoUnset = -1;
                                            selector:@selector(handleAVPlayerAccess:)
                                                name:AVPlayerItemNewAccessLogEntryNotification
                                              object:nil];
-  [[NSNotificationCenter defaultCenter] removeObserver:self
-                                                  name: AVPlayerItemFailedToPlayToEndTimeNotification
-                                                object:nil];
-  [[NSNotificationCenter defaultCenter] addObserver:self
-                                           selector:@selector(didFailToFinishPlaying:)
-                                               name: AVPlayerItemFailedToPlayToEndTimeNotification
-                                             object:nil];
 
 }
 
@@ -777,16 +757,6 @@ static int const RCTVideoUnset = -1;
         self.onBandwidthUpdate(@{@"bitrate": [NSNumber numberWithFloat:lastEvent.observedBitrate]});
     }
     */
-}
-
-- (void)didFailToFinishPlaying:(NSNotification *)notification {
-    NSError *error = notification.userInfo[AVPlayerItemFailedToPlayToEndTimeErrorKey];
-    self.onVideoError(@{@"error": @{@"code": [NSNumber numberWithInteger: error.code],
-                                    @"localizedDescription": [error localizedDescription] == nil ? @"" : [error localizedDescription],
-                                    @"localizedFailureReason": [error localizedFailureReason] == nil ? @"" : [error localizedFailureReason],
-                                    @"localizedRecoverySuggestion": [error localizedRecoverySuggestion] == nil ? @"" : [error localizedRecoverySuggestion],
-                                    @"domain": error.domain},
-                        @"target": self.reactTag});
 }
 
 - (void)playbackStalled:(NSNotification *)notification
@@ -898,7 +868,13 @@ static int const RCTVideoUnset = -1;
     } else if([_ignoreSilentSwitch isEqualToString:@"obey"]) {
       [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:nil];
     }
-    [_player play];
+    
+    if (@available(iOS 10.0, *) && !_automaticallyWaitsToMinimizeStalling) {
+      [_player playImmediatelyAtRate:_rate];
+    } else {
+      [_player play];
+      [_player setRate:_rate];
+    }
     [_player setRate:_rate];
   }
   
@@ -985,11 +961,19 @@ static int const RCTVideoUnset = -1;
   _playerItem.preferredPeakBitRate = maxBitRate;
 }
 
+- (void)setAutomaticallyWaitsToMinimizeStalling:(BOOL)waits
+{
+	_automaticallyWaitsToMinimizeStalling = waits;
+	_player.automaticallyWaitsToMinimizeStalling = waits;
+}
+
 
 - (void)applyModifiers
 {
   if (_muted) {
-    [_player setVolume:0];
+    if (!_controls) {
+      [_player setVolume:0];
+    }
     [_player setMuted:YES];
   } else {
     [_player setVolume:_volume];
@@ -1311,7 +1295,9 @@ static int const RCTVideoUnset = -1;
 {
   if( _player )
   {
-    _playerViewController = [self createPlayerViewController:_player withPlayerItem:_playerItem];
+    if (!_playerViewController) {
+      _playerViewController = [self createPlayerViewController:_player withPlayerItem:_playerItem];
+    }
     // to prevent video from being animated when resizeMode is 'cover'
     // resize mode must be set before subview is added
     [self setResizeMode:_resizeMode];
@@ -1321,6 +1307,8 @@ static int const RCTVideoUnset = -1;
       [viewController addChildViewController:_playerViewController];
       [self addSubview:_playerViewController.view];
     }
+      
+    [_playerViewController addObserver:self forKeyPath:readyForDisplayKeyPath options:NSKeyValueObservingOptionNew context:nil];
     
     [_playerViewController.contentOverlayView addObserver:self forKeyPath:@"frame" options:NSKeyValueObservingOptionNew | NSKeyValueObservingOptionOld context:NULL];
   }
@@ -1393,6 +1381,11 @@ static int const RCTVideoUnset = -1;
 {
   if (_playerViewController == playerViewController && _fullscreenPlayerPresented && self.onVideoFullscreenPlayerWillDismiss)
   {
+    @try{
+      [_playerViewController.contentOverlayView removeObserver:self forKeyPath:@"frame"];
+      [_playerViewController removeObserver:self forKeyPath:readyForDisplayKeyPath];
+    }@catch(id anException){
+    }
     self.onVideoFullscreenPlayerWillDismiss(@{@"target": self.reactTag});
   }
 }
@@ -1516,7 +1509,10 @@ static int const RCTVideoUnset = -1;
   [self removePlayerLayer];
   
   [_playerViewController.contentOverlayView removeObserver:self forKeyPath:@"frame"];
+  [_playerViewController removeObserver:self forKeyPath:readyForDisplayKeyPath];
   [_playerViewController.view removeFromSuperview];
+  _playerViewController.rctDelegate = nil;
+  _playerViewController.player = nil;
   _playerViewController = nil;
   
   [self removePlayerTimeObserver];
@@ -1578,48 +1574,6 @@ static int const RCTVideoUnset = -1;
     }
 }
 
-- (void)setLicenseResult:(NSString *)license {
-    NSData *respondData = [self base64DataFromBase64String:license];
-    if (_loadingRequest != nil && respondData != nil) {
-        AVAssetResourceLoadingDataRequest *dataRequest = [_loadingRequest dataRequest];
-        [dataRequest respondWithData:respondData];
-        [_loadingRequest finishLoading];
-    } else {
-        [self setLicenseResultError:@"No data from JS license response"];
-    }
-}
-
-- (BOOL)setLicenseResultError:(NSString *)error {
-    if (_loadingRequest != nil) {
-        NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                    code: RCTVideoErrorFromJSPart
-                                                userInfo: @{
-                                                            NSLocalizedDescriptionKey: error,
-                                                            NSLocalizedFailureReasonErrorKey: error,
-                                                            NSLocalizedRecoverySuggestionErrorKey: error
-                                                            }
-                                 ];
-        [self finishLoadingWithError:licenseError];
-    }
-    return NO;
-}
-
-- (BOOL)finishLoadingWithError:(NSError *)error {
-  if (_loadingRequest && error != nil) {
-      NSError *licenseError = error;
-      [_loadingRequest finishLoadingWithError:licenseError];
-      if (self.onVideoError) {
-        self.onVideoError(@{@"error": @{@"code": [NSNumber numberWithInteger: error.code],
-                                        @"localizedDescription": [error localizedDescription] == nil ? @"" : [error localizedDescription],
-                                        @"localizedFailureReason": [error localizedFailureReason] == nil ? @"" : [error localizedFailureReason],
-                                        @"localizedRecoverySuggestion": [error localizedRecoverySuggestion] == nil ? @"" : [error localizedRecoverySuggestion],
-                                        @"domain": _playerItem.error.domain},
-                            @"target": self.reactTag});
-      }
-  }
-  return NO;
-}
-
 - (BOOL)ensureDirExistsWithPath:(NSString *)path {
     BOOL isDir = NO;
     NSError *error;
@@ -1644,193 +1598,6 @@ static int const RCTVideoUnset = -1;
     return array[0];
 }
 
-#pragma mark - AVAssetResourceLoaderDelegate
-
-- (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader shouldWaitForRenewalOfRequestedResource:(AVAssetResourceRenewalRequest *)renewalRequest {
-    return [self loadingRequestHandling:renewalRequest];
-}
-
-- (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
-    return [self loadingRequestHandling:loadingRequest];
-}
- 
- - (void)resourceLoader:(AVAssetResourceLoader *)resourceLoader
-        didCancelLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest {
-            NSLog(@"didCancelLoadingRequest");
-}
-
-- (BOOL)loadingRequestHandling:(AVAssetResourceLoadingRequest *)loadingRequest {
-    _loadingRequest = loadingRequest;
-    NSURL *url = loadingRequest.request.URL;
-    NSString *contentId = url.host;
-    if (_drm != nil) {
-        NSString *contentIdOverride = (NSString *)[_drm objectForKey:@"contentId"];
-        if (contentIdOverride != nil) {
-            contentId = contentIdOverride;
-        }
-        NSString *drmType = (NSString *)[_drm objectForKey:@"type"];
-        if ([drmType isEqualToString:@"fairplay"]) {
-            NSString *certificateStringUrl = (NSString *)[_drm objectForKey:@"certificateUrl"];
-            if (certificateStringUrl != nil) {
-                NSURL *certificateURL = [NSURL URLWithString:[certificateStringUrl stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding]];
-                NSData *certificateData = [NSData dataWithContentsOfURL:certificateURL];
-                if ([_drm objectForKey:@"base64Certificate"]) {
-                    certificateData = [[NSData alloc] initWithBase64EncodedData:certificateData options:NSDataBase64DecodingIgnoreUnknownCharacters];
-                }
-                
-                if (certificateData != nil) {
-                    NSData *contentIdData = [contentId dataUsingEncoding:NSUTF8StringEncoding];
-                    AVAssetResourceLoadingDataRequest *dataRequest = [loadingRequest dataRequest];
-                    if (dataRequest != nil) {
-                        NSError *spcError = nil;
-                        NSData *spcData = [loadingRequest streamingContentKeyRequestDataForApp:certificateData contentIdentifier:contentIdData options:nil error:&spcError];
-                        // Request CKC to the server
-                        NSString *licenseServer = (NSString *)[_drm objectForKey:@"licenseServer"];
-                        if (spcError != nil) {
-                            return [self finishLoadingWithError:spcError];
-                        }
-                        if (spcData != nil) {
-                            if(self.onGetLicense) {
-                                NSString *spcStr = [[NSString alloc] initWithData:spcData encoding:NSASCIIStringEncoding];
-                                self.onGetLicense(@{@"spc": spcStr,
-                                                    @"target": self.reactTag});
-                                return YES;
-                            } else if(licenseServer != nil) {
-                                NSMutableURLRequest *request = [[NSMutableURLRequest alloc] init];
-                                [request setHTTPMethod:@"POST"];
-                                [request setURL:[NSURL URLWithString:licenseServer]];
-                                // HEADERS
-                                NSDictionary *headers = (NSDictionary *)[_drm objectForKey:@"headers"];
-                                if (headers != nil) {
-                                    for (NSString *key in headers) {
-                                        NSString *value = headers[key];
-                                        [request setValue:value forHTTPHeaderField:key];
-                                    }
-                                }                                
-                                //
-
-                                [request setHTTPBody: spcData];
-                                NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
-                                NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
-                                NSURLSessionDataTask *postDataTask = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                                    NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *) response;
-                                    if (error != nil) {
-                                        NSLog(@"Error getting license from %@, HTTP status code %li", url, (long)[httpResponse statusCode]);
-                                       [self finishLoadingWithError:error];
-                                    } else {
-                                        if([httpResponse statusCode] != 200){
-                                            NSLog(@"Error getting license from %@, HTTP status code %li", url, (long)[httpResponse statusCode]);
-                                            NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                                                        code: RCTVideoErrorLicenseRequestNotOk
-                                                                                    userInfo: @{
-                                                                                                NSLocalizedDescriptionKey: @"Error obtaining license.",
-                                                                                                NSLocalizedFailureReasonErrorKey: [NSString stringWithFormat:@"License server responded with status code %li", (long)[httpResponse statusCode]],
-                                                                                                NSLocalizedRecoverySuggestionErrorKey: @"Did you send the correct data to the license Server? Is the server ok?"
-                                                                                                }
-                                                                     ];
-                                            [self finishLoadingWithError:licenseError];
-                                        } else if (data != nil) {
-                                            [dataRequest respondWithData:data];
-                                            [loadingRequest finishLoading];
-                                        } else {
-                                            NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                                                        code: RCTVideoErrorNoDataFromLicenseRequest
-                                                                                    userInfo: @{
-                                                                                                NSLocalizedDescriptionKey: @"Error obtaining DRM license.",
-                                                                                                NSLocalizedFailureReasonErrorKey: @"No data received from the license server.",
-                                                                                                NSLocalizedRecoverySuggestionErrorKey: @"Is the licenseServer ok?."
-                                                                                                }
-                                                                     ];
-                                            [self finishLoadingWithError:licenseError];
-                                        }
-
-                                    }
-                                }];
-                                [postDataTask resume];
-                                return YES;
-                            }
-                            
-                        } else {
-                            NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                                        code: RCTVideoErrorNoSPC
-                                                                    userInfo: @{
-                                                                                NSLocalizedDescriptionKey: @"Error obtaining license.",
-                                                                                NSLocalizedFailureReasonErrorKey: @"No spc received.",
-                                                                                NSLocalizedRecoverySuggestionErrorKey: @"Check your DRM config."
-                                                                                }
-                                                     ];
-                            return [self finishLoadingWithError:licenseError];
-                        }
-                        
-                    } else {
-                        NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                                    code: RCTVideoErrorNoDataRequest
-                                                                userInfo: @{
-                                                                            NSLocalizedDescriptionKey: @"Error obtaining DRM license.",
-                                                                            NSLocalizedFailureReasonErrorKey: @"No dataRequest found.",
-                                                                            NSLocalizedRecoverySuggestionErrorKey: @"Check your DRM configuration."
-                                                                            }
-                                                 ];
-                        return [self finishLoadingWithError:licenseError];
-                    }
-                } else {
-                    NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                                code: RCTVideoErrorNoCertificateData
-                                                            userInfo: @{
-                                                                        NSLocalizedDescriptionKey: @"Error obtaining DRM license.",
-                                                                        NSLocalizedFailureReasonErrorKey: @"No certificate data obtained from the specificied url.",
-                                                                        NSLocalizedRecoverySuggestionErrorKey: @"Have you specified a valid 'certificateUrl'?"
-                                                                        }
-                                             ];
-                    return [self finishLoadingWithError:licenseError];
-                }
-            } else {
-                NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                            code: RCTVideoErrorNoCertificateURL
-                                                        userInfo: @{
-                                                                    NSLocalizedDescriptionKey: @"Error obtaining DRM License.",
-                                                                    NSLocalizedFailureReasonErrorKey: @"No certificate URL has been found.",
-                                                                    NSLocalizedRecoverySuggestionErrorKey: @"Did you specified the prop certificateUrl?"
-                                                                    }
-                                         ];
-                return [self finishLoadingWithError:licenseError];
-            }
-        } else {
-            NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                        code: RCTVideoErrorNoFairplayDRM
-                                                    userInfo: @{
-                                                                NSLocalizedDescriptionKey: @"Error obtaining DRM license.",
-                                                                NSLocalizedFailureReasonErrorKey: @"Not a valid DRM Scheme has found",
-                                                                NSLocalizedRecoverySuggestionErrorKey: @"Have you specified the 'drm' 'type' as fairplay?"
-                                                                }
-                                     ];
-            return [self finishLoadingWithError:licenseError];
-        }
-        
-    } else {
-        NSError *licenseError = [NSError errorWithDomain: @"RCTVideo"
-                                                    code: RCTVideoErrorNoDRMData
-                                                userInfo: @{
-                                                            NSLocalizedDescriptionKey: @"Error obtaining DRM license.",
-                                                            NSLocalizedFailureReasonErrorKey: @"No drm object found.",
-                                                            NSLocalizedRecoverySuggestionErrorKey: @"Have you specified the 'drm' prop?"
-                                                            }
-                                 ];
-        return [self finishLoadingWithError:licenseError];
-    }
-    
-    
-    return NO;
-}
-
-- (NSData *)base64DataFromBase64String: (NSString *)base64String {
-    if (base64String != nil) {
-        // NSData from the Base64 encoded str
-        NSData *base64Data = [[NSData alloc] initWithBase64EncodedString:base64String options:NSASCIIStringEncoding];
-        return base64Data;
-    }
-    return nil;
-}
 #pragma mark - Picture in Picture
 
 #if TARGET_OS_IOS
