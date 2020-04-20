@@ -199,8 +199,6 @@ class ReactExoplayerView extends FrameLayout implements
         audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         themedReactContext.addLifecycleEventListener(this);
         audioBecomingNoisyReceiver = new AudioBecomingNoisyReceiver(themedReactContext);
-
-        initializePlayer();
     }
 
 
