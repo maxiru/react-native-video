@@ -11,6 +11,8 @@ import com.facebook.react.common.MapBuilder;
 import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.ViewGroupManager;
 import com.facebook.react.uimanager.annotations.ReactProp;
+import com.facebook.react.bridge.ReactMethod;
+import com.google.android.exoplayer2.util.Util;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.upstream.RawResourceDataSource;
 
@@ -26,6 +28,10 @@ public class ReactExoplayerViewManager extends ViewGroupManager<ReactExoplayerVi
     private static final String PROP_SRC = "src";
     private static final String PROP_SRC_URI = "uri";
     private static final String PROP_SRC_TYPE = "type";
+    private static final String PROP_SRC_DRM = "drm";
+    private static final String PROP_SRC_DRM_TYPE = "type";
+    private static final String PROP_SRC_DRM_LICENSESERVER = "licenseServer";
+    private static final String PROP_SRC_DRM_HEADERS = "headers";
     private static final String PROP_SRC_HEADERS = "requestHeaders";
     private static final String PROP_RESIZE_MODE = "resizeMode";
     private static final String PROP_REPEAT = "repeat";
@@ -98,6 +104,31 @@ public class ReactExoplayerViewManager extends ViewGroupManager<ReactExoplayerVi
                 "ScaleToFill", Integer.toString(ResizeMode.RESIZE_MODE_FILL),
                 "ScaleAspectFill", Integer.toString(ResizeMode.RESIZE_MODE_CENTER_CROP)
         );
+    }
+
+    @ReactProp(name = PROP_SRC_DRM)
+    public void setDRM(final ReactExoplayerView videoView, @Nullable ReadableMap drm) {
+        if (drm != null && drm.hasKey(PROP_SRC_DRM_TYPE)) {
+            String drmType = drm.hasKey(PROP_SRC_DRM_TYPE) ? drm.getString(PROP_SRC_DRM_TYPE) : null;
+            String drmLicenseServer = drm.hasKey(PROP_SRC_DRM_LICENSESERVER) ? drm.getString(PROP_SRC_DRM_LICENSESERVER) : null;
+            ReadableMap drmHeaders = drm.hasKey(PROP_SRC_DRM_HEADERS) ? drm.getMap(PROP_SRC_DRM_HEADERS) : null;
+            if (drmType != null && drmLicenseServer != null && Util.getDrmUuid(drmType) != null) {
+                UUID drmUUID = Util.getDrmUuid(drmType);
+                videoView.setDrmType(drmUUID);
+                videoView.setDrmLicenseUrl(drmLicenseServer);
+                if (drmHeaders != null) {
+                    ArrayList<String> drmKeyRequestPropertiesList = new ArrayList<>();
+                    ReadableMapKeySetIterator itr = drmHeaders.keySetIterator();
+                    while (itr.hasNextKey()) {
+                        String key = itr.nextKey();
+                        drmKeyRequestPropertiesList.add(key);
+                        drmKeyRequestPropertiesList.add(drmHeaders.getString(key));
+                    }
+                    videoView.setDrmLicenseHeader(drmKeyRequestPropertiesList.toArray(new String[0]));
+                }
+                videoView.setUseTextureView(false);
+            }
+        }
     }
 
     @ReactProp(name = PROP_SRC)
